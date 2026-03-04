@@ -114,6 +114,7 @@ COLUMN_NAMES_ZH = {
     "valid_n": "有效样本量",
     "coverage_rate": "覆盖率",
     "importance": "特征重要性(Gini)",
+    # result_df 中 coverage merge 后列名为 filter_status；full_coverage 中原始键为 status
     "filter_status": "过滤状态",
     "status": "过滤状态",
     "weight_var": "权重变量",
@@ -533,7 +534,7 @@ def export_cleaned_dataset(
 
     # 抽样权重
     if weight_col and weight_col in df.columns:
-        frames[f"抽样权重"] = clean_negative_codes(df[weight_col])
+        frames["抽样权重"] = clean_negative_codes(df[weight_col])
 
     cleaned_df = pd.DataFrame(frames)
     # 只保留有效行（结局不为 NaN）
