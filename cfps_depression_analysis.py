@@ -20,6 +20,8 @@ cfps_depression_analysis.py
     python cfps_depression_analysis.py
 """
 
+from __future__ import annotations
+
 # ===========================================================================
 # 导入
 # ===========================================================================
@@ -46,7 +48,7 @@ from sklearn.ensemble import (
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import KFold, cross_validate
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -102,8 +104,14 @@ RANDOM_STATE = 42
 CV_FOLDS = 5
 COVERAGE_THRESHOLD = 0.40      # 变量有效覆盖率阈值
 
-# CFPS 通用负值编码（缺失/不适用）
-NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
+# CFPS 通用负值编码（缺失/不适用）——仅包含全局通用缺失码
+NEGATIVE_CODES = [-1, -2, -8, -9, -10]
+
+# 扩展缺失码（含"不适用"编码 79），仅对分类/健康变量使用
+EXTENDED_NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
+
+# 需使用扩展编码的变量集合（健康/分类变量）
+EXTENDED_CODE_VARS = {"wc0", "wc4_1", "qp4001", "ill"}
 
 # 社会情绪发展得分条目（we3xx，1–5 点 Likert 正向计分）
 EMOTION_ITEMS = [f"we3{str(i).zfill(2)}" for i in range(1, 13)]
@@ -162,9 +170,14 @@ logger = logging.getLogger(__name__)
 # 工具函数
 # ===========================================================================
 
-def clean_negative_codes(series: pd.Series) -> pd.Series:
-    """将 CFPS 负值/不适用编码替换为 NaN。"""
-    return series.replace({c: np.nan for c in NEGATIVE_CODES})
+def clean_negative_codes(
+    series: pd.Series,
+    codes: list[int] | None = None,
+) -> pd.Series:
+    """将 CFPS 负值/不适用编码替换为 NaN。若未指定 codes，使用 NEGATIVE_CODES。"""
+    if codes is None:
+        codes = NEGATIVE_CODES
+    return series.replace({c: np.nan for c in codes})
 
 
 def compute_coverage(series: pd.Series) -> float:
@@ -304,28 +317,30 @@ def build_feature_matrix(
     df: pd.DataFrame,
     valid_map: dict[str, str],
     outcome_col: str,
-) -> tuple[pd.DataFrame, pd.Series, list[str]]:
+) -> tuple[pd.DataFrame, pd.Series, list[str], pd.Index]:
     """
     构建清洗后的特征矩阵 X 和结局向量 y。
-    - 对所有特征应用负值编码清洗
+    - 对健康/分类变量使用扩展缺失码（含 79），对成绩等连续变量使用基础缺失码
     - 仅保留结局变量不为 NaN 的行
-    返回 (X_clean, y_clean, feature_labels)
+    返回 (X_clean, y_clean, feature_labels, orig_index)
+    其中 orig_index 为过滤后行在 df 中的原始索引，用于后续与 df_orig 对齐。
     """
     feature_labels = list(valid_map.keys())
-    feature_cols = list(valid_map.values())
 
     X_raw = pd.DataFrame(index=df.index)
     for label, col in valid_map.items():
-        X_raw[label] = clean_negative_codes(df[col])
+        codes = EXTENDED_NEGATIVE_CODES if col in EXTENDED_CODE_VARS else NEGATIVE_CODES
+        X_raw[label] = clean_negative_codes(df[col], codes=codes)
 
     y = df[outcome_col]
     mask = y.notna()
+    orig_index = mask[mask].index
     X_clean = X_raw[mask].reset_index(drop=True)
     y_clean = y[mask].reset_index(drop=True)
 
     logger.info("特征矩阵：%d 行 × %d 列，特征：%s",
                 len(y_clean), len(feature_labels), feature_labels)
-    return X_clean, y_clean, feature_labels
+    return X_clean, y_clean, feature_labels, orig_index
 
 
 # ===========================================================================
@@ -429,15 +444,14 @@ def run_cv(
         logger.info("CV 评估模型：%s", name)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
-            r2_scores = cross_val_score(
-                pipeline, X, y, cv=cv, scoring="r2", n_jobs=-1
+            scores = cross_validate(
+                pipeline, X, y, cv=cv,
+                scoring=["r2", "neg_mean_squared_error", "neg_mean_absolute_error"],
+                n_jobs=-1,
             )
-            neg_mse = cross_val_score(
-                pipeline, X, y, cv=cv, scoring="neg_mean_squared_error", n_jobs=-1
-            )
-            neg_mae = cross_val_score(
-                pipeline, X, y, cv=cv, scoring="neg_mean_absolute_error", n_jobs=-1
-            )
+        r2_scores = scores["test_r2"]
+        neg_mse = scores["test_neg_mean_squared_error"]
+        neg_mae = scores["test_neg_mean_absolute_error"]
         rmse_scores = np.sqrt(-neg_mse)
         mae_scores = -neg_mae
         results[name] = {
@@ -540,7 +554,6 @@ def run_shap_analysis(
     # Beeswarm Plot
     # -----------------------------------------------------------------------
     try:
-        fig, ax = plt.subplots(figsize=(10, 6))
         shap.summary_plot(
             shap_values,
             X_test_trans,
@@ -548,6 +561,8 @@ def run_shap_analysis(
             show=False,
             plot_type="dot",
         )
+        fig = plt.gcf()
+        fig.set_size_inches(10, 6)
         plt.title(f"SHAP Beeswarm Plot（{model_name}）\n"
                   r"特征对社会情绪发展得分（$Y$）的 SHAP 贡献", fontsize=12)
         plt.tight_layout()
@@ -629,8 +644,9 @@ def plot_r2_boxplot(
         flierprops={"marker": "o", "markersize": 5, "alpha": 0.5},
     )
 
-    colors = ["#3498db", "#2ecc71", "#e67e22", "#9b59b6", "#1abc9c"]
-    for patch, color in zip(bp["boxes"], colors[:len(model_names)]):
+    cmap = plt.cm.get_cmap("tab10", len(model_names))
+    colors = [cmap(i) for i in range(len(model_names))]
+    for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.75)
 
@@ -716,6 +732,7 @@ def export_pro_csv(
     shap_values: np.ndarray | None,
     feature_labels: list[str],
     weight_col: str | None,
+    orig_index: pd.Index,
 ) -> None:
     """
     导出 socioemotional_pro_analysis.csv：
@@ -723,12 +740,10 @@ def export_pro_csv(
     """
     out = X_clean.copy()
 
-    # 受访者 ID（使用 y_clean.index 确保行对齐，不依赖位置假设）
+    # 受访者 ID（使用 orig_index 回查 df_orig，确保行对齐）
     for id_col in ("pid", "personid", "childid", "id"):
         if id_col in df_orig.columns:
-            valid_idx = [i for i in y_clean.index if i in df_orig.index]
-            id_vals = df_orig.loc[valid_idx, id_col].values if valid_idx else np.full(len(y_clean), np.nan)
-            out.insert(0, "受访者ID", id_vals)
+            out.insert(0, "受访者ID", df_orig.loc[orig_index, id_col].values)
             break
 
     out["真实社会情绪发展得分_Y"] = y_clean.values
@@ -739,18 +754,22 @@ def export_pro_csv(
         y_pred = best_pipeline.predict(X_clean)
     out[f"预测得分_{best_name}"] = y_pred
 
-    # SHAP 贡献值
-    if shap_values is not None:
+    # SHAP 贡献值（校验行数一致性后再拼接）
+    if shap_values is not None and shap_values.shape[0] == len(out):
         for j, lbl in enumerate(feature_labels):
             col_name = f"SHAP_{lbl}"
             if j < shap_values.shape[1]:
                 out[col_name] = shap_values[:, j]
+    elif shap_values is not None:
+        logger.warning(
+            "SHAP values 行数 (%d) 与输出行数 (%d) 不一致，跳过 SHAP 列导出",
+            shap_values.shape[0], len(out),
+        )
 
-    # 抽样权重（按 y_clean.index 索引对齐，避免 iloc[:n] 行位置偏差）
+    # 抽样权重（使用 orig_index 回查 df_orig，确保行对齐）
     if weight_col and weight_col in df_orig.columns:
         w_vals = clean_negative_codes(df_orig[weight_col])
-        valid_idx = [i for i in y_clean.index if i in w_vals.index]
-        out["抽样权重"] = w_vals.loc[valid_idx].values if valid_idx else np.ones(len(y_clean))
+        out["抽样权重"] = w_vals.loc[orig_index].values
 
     out.to_csv(OUT_CSV_PRO, index=False, encoding="utf-8-sig")
     logger.info("Pro CSV 已保存：%s（%d 行 × %d 列）",
@@ -841,7 +860,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5. 构建特征矩阵 X 和结局向量 y
     # ------------------------------------------------------------------
-    X_clean, y_clean, feature_labels = build_feature_matrix(df, valid_map, outcome_col)
+    X_clean, y_clean, feature_labels, orig_index = build_feature_matrix(df, valid_map, outcome_col)
 
     # ------------------------------------------------------------------
     # 6. Spearman 相关性分析 + 绘图
@@ -913,6 +932,7 @@ def main() -> None:
         shap_values=shap_values,
         feature_labels=feature_labels,
         weight_col=weight_col,
+        orig_index=orig_index,
     )
 
     # ------------------------------------------------------------------
