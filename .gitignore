@@ -1,0 +1,11 @@
+# CFPS 数据文件（含个人信息，不纳入版本控制）
+*.dta
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 分析输出（本地生成，不纳入版本控制）
+depression_factors_correlation.csv
+depression_feature_importance.png
