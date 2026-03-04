@@ -1,0 +1,27 @@
+# Generated analysis outputs
+depression_analysis_results.csv
+depression_analysis_results_coverage.csv
+depression_analysis_plot.png
+socioemotional_analysis_results.csv
+socioemotional_analysis_results_coverage.csv
+socioemotional_analysis_plot.png
+socioemotional_cleaned_data.csv
+
+# cfps_depression_analysis.py (pro) outputs
+socioemotional_pro_analysis.csv
+socioemotional_r2_boxplot.png
+socioemotional_shap_beeswarm.png
+socioemotional_shap_bmi_dependence.png
+socioemotional_spearman_corr.png
+
+# cfps_ml_pipeline.py outputs
+cfps_pipeline_results.csv
+cfps_pipeline_roc_prc.png
+cfps_pipeline_calibration.png
+cfps_pipeline_shap_importance.png
+cfps_pipeline_shap_bmi.png
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
