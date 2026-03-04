@@ -1,0 +1,9 @@
+# Generated analysis outputs
+depression_analysis_results.csv
+depression_analysis_results_coverage.csv
+depression_analysis_plot.png
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo

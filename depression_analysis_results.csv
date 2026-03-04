@@ -1,0 +1,10 @@
+﻿factor_label,variable,spearman_rho,valid_n,coverage_rate,importance,filter_status,weight_var,cv_auc
+年龄(age),age,0.3066,6228,1.0,0.26799027687557764,保留,rswt_natcs22n,0.7222
+语文成绩(chinese_score),wf501,0.1402,3526,0.5662,0.0719910249383582,保留,rswt_natcs22n,0.7222
+数学成绩(math_score),wf502,0.1236,3528,0.5665,0.07474137522835511,保留,rswt_natcs22n,0.7222
+BMI指数(bmi),bmi,0.0838,5878,0.9438,0.4541205227687645,保留,rswt_natcs22n,0.7222
+过去一月生病(recent_illness),wc0,-0.058,6036,0.9692,0.02740720210146167,保留,rswt_natcs22n,0.7222
+性别(gender),gender,0.0269,6228,1.0,0.03690991129241517,保留,rswt_natcs22n,0.7222
+慢性病诊断(chronic_disease),wc4_1,-0.0208,4749,0.7625,0.03165870778813872,保留,rswt_natcs22n,0.7222
+城乡(urban),urban22,0.0143,5896,0.9467,0.03518097900692891,保留,rswt_natcs22n,0.7222
+民族(ethnicity),minzu,,5184,0.8324,0.0,保留,rswt_natcs22n,0.7222
