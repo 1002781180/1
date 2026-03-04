@@ -30,7 +30,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 # 注册 WenQuanYi Zen Hei 字体（如存在），以支持中文显示
 _WQY_FONT = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
@@ -49,6 +48,16 @@ RANDOM_STATE = 42
 
 # CFPS 通用负值编码（缺失/不适用）
 NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
+
+# ---------------------------------------------------------------------------
+# 情绪健康得分截断阈值（结局二值化）
+# ---------------------------------------------------------------------------
+# 设为 None 时自动使用样本中位数（相对截断，仅具探索意义）。
+# 若已知量表的流行病学临床划界分（cut-off），应将此值设为对应均值阈值，
+# 例如 CFPS we3xx 条目若对应 SDQ（Strengths and Difficulties Questionnaire）
+# 福祉子量表，需查阅 CFPS 用户手册确认 1-5 点量表的官方截断值后填入。
+# 示例：WELLBEING_CUTOFF = 3.0  → 均分 < 3.0 判定为高风险
+WELLBEING_CUTOFF: float | None = None
 
 # 抑郁风险得分使用的情绪行为条目（we3xx）
 EMOTION_ITEMS = [f"we3{str(i).zfill(2)}" for i in range(1, 13)]
@@ -169,8 +178,12 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
     基于 we3xx 情绪行为条目构建情绪健康得分，并二值化为"低健康/高风险"标签。
     - 将负值编码替换为 NaN
     - 对逆向条目取反（6 - score，使高分代表更高风险）
-    - 行均值 < 中位数 → label=1（高风险）；否则 → label=0
+    - 若 WELLBEING_CUTOFF 不为 None，使用该临床阈值：均分 < cutoff → label=1
+    - 否则使用样本中位数（相对截断，仅具探索意义）
     - 所有情绪条目均为 NaN 的行保留为 NaN（不参与训练）
+
+    注意：Spearman 相关系数的正负号含义由此处 label 定义决定：
+    label=1 代表"高风险（低福祉）"，因此 ρ>0 表示该特征值越大越倾向高风险。
     """
     available = [c for c in EMOTION_ITEMS if c in df.columns]
     logger.info("情绪条目（%d 个）：%s", len(available), available)
@@ -183,8 +196,19 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
 
     # 行均值得分（正向：越高越健康）；所有条目均 NaN 的行得分为 NaN
     wellbeing = score_df.mean(axis=1)
-    # 低于中位数 → 高风险（label=1）；NaN 行保留为 NaN，后续由 train_random_forest 过滤
-    threshold = wellbeing.median()
+
+    if WELLBEING_CUTOFF is not None:
+        threshold = WELLBEING_CUTOFF
+        logger.info("使用临床划界分阈值：%.2f（来自 WELLBEING_CUTOFF 配置）", threshold)
+    else:
+        threshold = wellbeing.median()
+        logger.warning(
+            "WELLBEING_CUTOFF 未设置，使用样本中位数（%.2f）作为截断阈值。"
+            "此为相对截断，建议查阅 CFPS 用户手册，将 WELLBEING_CUTOFF 设为量表官方临床划界分",
+            threshold,
+        )
+
+    # 低于阈值 → 高风险（label=1）；NaN 行保留为 NaN，后续由 train_random_forest 过滤
     labels = pd.Series(
         np.where(wellbeing.notna(), (wellbeing < threshold).astype(float), np.nan),
         index=wellbeing.index,
@@ -198,7 +222,7 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
             nan_count / len(df) * 100,
         )
     logger.info(
-        "情绪健康得分：均值=%.2f，中位数=%.2f；高风险样本比=%.1f%%（基于 %d 有效行）",
+        "情绪健康得分：均值=%.2f，截断阈值=%.2f；高风险样本比=%.1f%%（基于 %d 有效行）",
         wellbeing[valid_mask].mean(),
         threshold,
         labels[valid_mask].mean() * 100,
@@ -306,6 +330,12 @@ def train_random_forest(
     """
     训练随机森林模型，支持抽样权重。
     返回 (pipeline, feature_importance_df, mean_auc)。
+
+    说明：
+    - Pipeline 仅含 SimpleImputer + RandomForestClassifier，无 StandardScaler。
+      树模型基于数值排序分裂，对特征尺度不敏感，缩放既无必要也无法接受抽样权重。
+    - 交叉验证与全量训练均传入相同抽样权重，确保评估指标与最终模型一致。
+    - 共线性检查：特征间 Spearman |ρ| ≥ 0.7 时输出警告，提示特征重要性解释风险。
     """
     feature_cols = list(valid_map.values())
     X_raw = df_analysis[feature_cols].copy()
@@ -332,19 +362,42 @@ def train_random_forest(
 
     logger.info("模型训练样本：n=%d，特征数=%d", len(y), len(feature_cols))
 
+    # -----------------------------------------------------------------------
+    # 共线性检查（Spearman |ρ| ≥ 0.7 发出警告）
+    # -----------------------------------------------------------------------
+    corr_matrix = X_raw.corr(method="spearman")
+    for i in range(len(feature_cols)):
+        for j in range(i + 1, len(feature_cols)):
+            rho_ij = corr_matrix.iloc[i, j]
+            if not np.isnan(rho_ij) and abs(rho_ij) >= 0.7:
+                logger.warning(
+                    "特征共线性警告：%s 与 %s 的 Spearman ρ=%.2f（≥0.7），"
+                    "特征重要性（Gini）可能被稀释，解读时建议视为同一维度",
+                    feature_cols[i],
+                    feature_cols[j],
+                    rho_ij,
+                )
+
+    # -----------------------------------------------------------------------
+    # Pipeline：仅 Imputer + RandomForest（无 StandardScaler，树模型无需特征缩放）
+    # -----------------------------------------------------------------------
     pipeline = Pipeline(
         [
             ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
             ("rf", RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)),
         ]
     )
 
-    # 交叉验证 AUC（不传权重，仅评估泛化性）
+    # 交叉验证 AUC（传入抽样权重，与全量训练保持一致）
+    # 注：sklearn >= 1.4 使用 params= 传递逐样本参数（会按折自动切片）
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-    auc_scores = cross_val_score(pipeline, X_raw, y, cv=cv, scoring="roc_auc")
+    cv_params = {"rf__sample_weight": w.values} if weight_col else {}
+    auc_scores = cross_val_score(
+        pipeline, X_raw, y, cv=cv, scoring="roc_auc", params=cv_params
+    )
     mean_auc = float(np.mean(auc_scores))
-    logger.info("5 折交叉验证 AUC：%.4f ± %.4f", mean_auc, np.std(auc_scores))
+    logger.info("5 折交叉验证 AUC（%s）：%.4f ± %.4f",
+                "加权" if weight_col else "未加权", mean_auc, np.std(auc_scores))
 
     # 全量训练（含抽样权重）
     if weight_col:
