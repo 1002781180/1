@@ -10,6 +10,19 @@ cfps_depression_analysis.py
   这些条目反映的是连续的社会情绪发展水平，而非临床抑郁诊断，
   因此不适合进行二值化截断，应作为连续结局变量进行回归分析。
 
+【对上次建议的评估】
+  上次建议将结局变量从"二分类（低于中位数=高风险）"改为"连续回归"——该建议完全正确。
+  理由如下：
+  ① we3xx 条目均为积极行为描述（乐观、耐心、同理心、亲社会行为），
+     高分代表更高的社会情绪发展水平，不存在"临床划界分"概念；
+  ② 以样本中位数作为截断阈值只是相对截断，无流行病学或量表手册依据，
+     将其解读为"抑郁风险"在方法论上存在根本错误；
+  ③ 连续回归保留了原始得分的方差信息，Spearman 相关系数与随机森林特征重要性
+     均能更准确地反映各预测因子的真实作用方向与强度；
+  ④ 使用 KFold（而非 StratifiedKFold）和 RMSE/R² 作为评估指标，
+     与连续结局的统计假设完全一致。
+  结论：回归框架在理论和方法上均优于原始的二分类框架。
+
 主要特性：
   - 自适应变量过滤（覆盖率阈值 COVERAGE_THRESHOLD）
   - 动态检测慢性病/健康状态代理变量（qp4001 优先，不存在则回退至 wc4_1）
@@ -37,11 +50,18 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import cross_val_score, KFold
 from sklearn.pipeline import Pipeline
 
-# 注册 WenQuanYi Zen Hei 字体（如存在），以支持中文显示
-_WQY_FONT = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-if Path(_WQY_FONT).exists():
-    _fm.fontManager.addfont(_WQY_FONT)
-    plt.rcParams["font.family"] = "WenQuanYi Zen Hei"
+# 注册中文字体：优先 WenQuanYi Zen Hei，其次 Noto Sans CJK SC
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansMonoCJKsc-Regular.otf",
+]
+for _font_path in _FONT_CANDIDATES:
+    if Path(_font_path).exists():
+        _fm.fontManager.addfont(_font_path)
+        _prop = _fm.FontProperties(fname=_font_path)
+        plt.rcParams["font.family"] = _prop.get_name()
+        break
 
 # ---------------------------------------------------------------------------
 # 全局配置
@@ -49,6 +69,7 @@ if Path(_WQY_FONT).exists():
 DATA_FILE = "cfps2022childproxy_202410.dta"
 OUTPUT_CSV = "socioemotional_analysis_results.csv"
 OUTPUT_PNG = "socioemotional_analysis_plot.png"
+OUTPUT_CLEANED_CSV = "socioemotional_cleaned_data.csv"
 COVERAGE_THRESHOLD = 0.40      # 变量有效覆盖率阈值（40%）
 RANDOM_STATE = 42
 
@@ -66,22 +87,39 @@ REVERSED_ITEMS: list[str] = []
 # 说明：qp4001（慢性病诊断）如存在优先使用，否则动态选择替代变量
 # ---------------------------------------------------------------------------
 FACTOR_MAP: dict[str, str] = {
-    "年龄(age)": "age",
-    "性别(gender)": "gender",
-    "城乡(urban)": "urban22",
-    "民族(ethnicity)": "minzu",
-    "语文成绩(chinese_score)": "wf501",
-    "数学成绩(math_score)": "wf502",
-    "过去一月生病(recent_illness)": "wc0",
-    "父母关心教育(parental_edu_care)": "wz301",
-    "父母主动沟通(parental_communication)": "wz302",
-    "BMI指数(bmi)": "bmi",
+    "年龄": "age",
+    "性别": "gender",
+    "城乡": "urban22",
+    "民族": "minzu",
+    "语文成绩": "wf501",
+    "数学成绩": "wf502",
+    "过去一月生病": "wc0",
+    "父母关心教育": "wz301",
+    "父母主动沟通": "wz302",
+    "BMI指数": "bmi",
     # 慢性病诊断变量：优先 qp4001，动态回退（见 resolve_chronic_disease_var）
-    "慢性病诊断(chronic_disease)": "qp4001",
+    "慢性病诊断": "qp4001",
 }
 
 # 权重候选变量（按优先级排序）
 WEIGHT_CANDIDATES = ["child_weight", "rswt_natcs22n", "rswt_natpn1022n"]
+
+# ---------------------------------------------------------------------------
+# 输出 CSV 列名中文映射
+# ---------------------------------------------------------------------------
+COLUMN_NAMES_ZH = {
+    "factor_label": "因子标签",
+    "variable": "变量名",
+    "spearman_rho": "斯皮尔曼ρ",
+    "valid_n": "有效样本量",
+    "coverage_rate": "覆盖率",
+    "importance": "特征重要性(Gini)",
+    "filter_status": "过滤状态",
+    "status": "过滤状态",
+    "weight_var": "权重变量",
+    "cv_rmse": "交叉验证RMSE",
+    "cv_r2": "交叉验证R²",
+}
 
 # ---------------------------------------------------------------------------
 # 日志配置
@@ -434,7 +472,7 @@ def plot_results(
     colors = ["#e74c3c" if r > 0 else "#3498db" for r in corr_df["spearman_rho"]]
     ax1.barh(corr_df["factor_label"], corr_df["spearman_rho"], color=colors)
     ax1.axvline(0, color="black", linewidth=0.8, linestyle="--")
-    ax1.set_xlabel("Spearman ρ", fontsize=11)
+    ax1.set_xlabel("斯皮尔曼相关系数 ρ", fontsize=11)
     ax1.set_title(f"预测因子与社会情绪发展得分相关性\n{title_suffix}", fontsize=12)
     ax1.invert_yaxis()
 
@@ -450,6 +488,61 @@ def plot_results(
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     logger.info("图表已保存：%s", output_path)
     plt.close()
+
+
+# ===========================================================================
+# 清洗数据集导出
+# ===========================================================================
+
+def export_cleaned_dataset(
+    df: pd.DataFrame,
+    factor_map: dict[str, str],
+    outcome_col: str,
+    weight_col: str | None,
+    output_path: str,
+) -> None:
+    """
+    将清洗好的分析数据集导出为 CSV。
+    包含：
+    - 所有候选预测因子（负值编码已替换为 NaN，列名使用中文标签）
+    - 社会情绪发展条目（we301–we312，负值编码已替换为 NaN）
+    - 社会情绪发展得分（结局变量）
+    - 抽样权重（若可用）
+    仅保留结局变量不为 NaN 的有效样本行。
+    """
+    frames: dict[str, pd.Series] = {}
+
+    # 候选 ID 列
+    for id_col in ("pid", "personid", "childid", "id"):
+        if id_col in df.columns:
+            frames["受访者ID"] = df[id_col]
+            break
+
+    # 预测因子（中文标签列名，负值已清洗）
+    for label, col in factor_map.items():
+        if col in df.columns:
+            frames[label] = clean_negative_codes(df[col])
+
+    # 社会情绪发展条目（原始变量名保留，负值已清洗）
+    for col in EMOTION_ITEMS:
+        if col in df.columns:
+            frames[col] = clean_negative_codes(df[col])
+
+    # 结局变量
+    frames["社会情绪发展得分"] = df[outcome_col]
+
+    # 抽样权重
+    if weight_col and weight_col in df.columns:
+        frames[f"抽样权重"] = clean_negative_codes(df[weight_col])
+
+    cleaned_df = pd.DataFrame(frames)
+    # 只保留有效行（结局不为 NaN）
+    cleaned_df = cleaned_df[df[outcome_col].notna()].reset_index(drop=True)
+
+    cleaned_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    logger.info(
+        "清洗数据集已保存：%s（%d 行 × %d 列）", output_path, *cleaned_df.shape
+    )
 
 
 # ===========================================================================
@@ -472,10 +565,10 @@ def main() -> None:
     chronic_col, chronic_desc = resolve_chronic_disease_var(df)
     if chronic_col is None:
         # 无可用健康变量，移除该条目
-        factor_map.pop("慢性病诊断(chronic_disease)", None)
+        factor_map.pop("慢性病诊断", None)
     elif chronic_col != "qp4001":
         # qp4001 不存在，替换为实际可用变量
-        factor_map["慢性病诊断(chronic_disease)"] = chronic_col
+        factor_map["慢性病诊断"] = chronic_col
         logger.info("慢性病变量替换：qp4001 → %s（%s）", chronic_col, chronic_desc)
 
     # 4. 构建结局变量（连续社会情绪发展得分）
@@ -517,13 +610,18 @@ def main() -> None:
     result_df["cv_rmse"] = round(mean_rmse, 4)
     result_df["cv_r2"] = round(mean_r2, 4)
 
+    result_df.rename(columns=COLUMN_NAMES_ZH, inplace=True)
     result_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     logger.info("结果已保存：%s（%d 行）", OUTPUT_CSV, len(result_df))
 
     # 同时保存覆盖率全表（含被过滤变量）
     coverage_csv = OUTPUT_CSV.replace(".csv", "_coverage.csv")
+    full_coverage.rename(columns=COLUMN_NAMES_ZH, inplace=True)
     full_coverage.to_csv(coverage_csv, index=False, encoding="utf-8-sig")
     logger.info("覆盖率明细已保存：%s", coverage_csv)
+
+    # 8b. 导出清洗好的数据集（建模前）
+    export_cleaned_dataset(df, factor_map, outcome_col, weight_col, OUTPUT_CLEANED_CSV)
 
     # 9. 可视化
     plot_results(
@@ -547,6 +645,13 @@ def main() -> None:
     print(f"  交叉验证 R²：{mean_r2:.4f}")
     print(f"  输出 CSV：{OUTPUT_CSV}")
     print(f"  输出 PNG：{OUTPUT_PNG}")
+    print(f"  清洗数据集：{OUTPUT_CLEANED_CSV}")
+    print("-" * 60)
+    print("【对上次建议的评估】")
+    print("  将结局变量从「二分类（中位数截断）」改为「连续回归」——✓ 建议正确。")
+    print("  原因：we3xx 条目均为积极行为描述（乐观、自我调节、同伴关系等），")
+    print("  采用 1–5 点 Likert 正向计分，无临床划界分，不适合二值化；")
+    print("  连续回归保留了原始方差信息，RMSE/R² 评估指标也与统计假设一致。")
     print("=" * 60 + "\n")
 
 
