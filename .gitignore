@@ -2,6 +2,9 @@
 depression_analysis_results.csv
 depression_analysis_results_coverage.csv
 depression_analysis_plot.png
+socioemotional_analysis_results.csv
+socioemotional_analysis_results_coverage.csv
+socioemotional_analysis_plot.png
 
 # cfps_ml_pipeline.py outputs
 cfps_pipeline_results.csv

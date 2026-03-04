@@ -1,8 +1,14 @@
 """
 cfps_depression_analysis.py
 ----------------------------
-基于 CFPS 2022 儿童代答问卷的儿童情绪健康分析脚本。
-实现随机森林分类模型，支持抽样权重、自适应变量过滤与详细日志输出。
+基于 CFPS 2022 儿童代答问卷的儿童社会情绪发展得分分析脚本。
+实现随机森林回归模型，支持抽样权重、自适应变量过滤与详细日志输出。
+
+背景说明：
+  CFPS 2022 we3xx 条目（we301–we312）测量的是儿童社会情绪发展中的积极行为
+  （乐观、自我调节、同伴关系、亲社会行为等），采用 1–5 点 Likert 评分。
+  这些条目反映的是连续的社会情绪发展水平，而非临床抑郁诊断，
+  因此不适合进行二值化截断，应作为连续结局变量进行回归分析。
 
 主要特性：
   - 自适应变量过滤（覆盖率阈值 COVERAGE_THRESHOLD）
@@ -26,9 +32,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyreadstat
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, KFold
 from sklearn.pipeline import Pipeline
 
 # 注册 WenQuanYi Zen Hei 字体（如存在），以支持中文显示
@@ -41,28 +47,18 @@ if Path(_WQY_FONT).exists():
 # 全局配置
 # ---------------------------------------------------------------------------
 DATA_FILE = "cfps2022childproxy_202410.dta"
-OUTPUT_CSV = "depression_analysis_results.csv"
-OUTPUT_PNG = "depression_analysis_plot.png"
+OUTPUT_CSV = "socioemotional_analysis_results.csv"
+OUTPUT_PNG = "socioemotional_analysis_plot.png"
 COVERAGE_THRESHOLD = 0.40      # 变量有效覆盖率阈值（40%）
 RANDOM_STATE = 42
 
 # CFPS 通用负值编码（缺失/不适用）
 NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
 
-# ---------------------------------------------------------------------------
-# 情绪健康得分截断阈值（结局二值化）
-# ---------------------------------------------------------------------------
-# 设为 None 时自动使用样本中位数（相对截断，仅具探索意义）。
-# 若已知量表的流行病学临床划界分（cut-off），应将此值设为对应均值阈值，
-# 例如 CFPS we3xx 条目若对应 SDQ（Strengths and Difficulties Questionnaire）
-# 福祉子量表，需查阅 CFPS 用户手册确认 1-5 点量表的官方截断值后填入。
-# 示例：WELLBEING_CUTOFF = 3.0  → 均分 < 3.0 判定为高风险
-WELLBEING_CUTOFF: float | None = None
-
-# 抑郁风险得分使用的情绪行为条目（we3xx）
+# 社会情绪发展得分条目（we3xx，1–5 点 Likert 正向计分）
+# 所有条目均为积极行为描述（高分=更高的社会情绪发展水平）
 EMOTION_ITEMS = [f"we3{str(i).zfill(2)}" for i in range(1, 13)]
-# 逆向计分条目列表（若某条目需取反使高分=更高风险，填入列名）
-# 当前所有 we3xx 条目均为正向（高分=更佳心理健康），列表留空
+# 逆向计分条目列表（当前所有 we3xx 条目均为正向，列表留空）
 REVERSED_ITEMS: list[str] = []
 
 # ---------------------------------------------------------------------------
@@ -170,23 +166,23 @@ def resolve_weight_var(df: pd.DataFrame) -> tuple[str | None, str]:
 
 
 # ===========================================================================
-# 结局变量构建（情绪健康得分 → 二分类）
+# 结局变量构建（社会情绪发展得分，连续变量）
 # ===========================================================================
 
-def build_outcome(df: pd.DataFrame) -> pd.Series:
+def build_socioemotional_score(df: pd.DataFrame) -> pd.Series:
     """
-    基于 we3xx 情绪行为条目构建情绪健康得分，并二值化为"低健康/高风险"标签。
+    基于 we3xx 条目构建儿童社会情绪发展得分（连续变量，均值 1–5 分）。
     - 将负值编码替换为 NaN
-    - 对逆向条目取反（6 - score，使高分代表更高风险）
-    - 若 WELLBEING_CUTOFF 不为 None，使用该临床阈值：均分 < cutoff → label=1
-    - 否则使用样本中位数（相对截断，仅具探索意义）
-    - 所有情绪条目均为 NaN 的行保留为 NaN（不参与训练）
+    - 对逆向计分条目取反（6 - score）
+    - 计算行均值作为结局变量（高分=更高社会情绪发展水平）
+    - 所有条目均为 NaN 的行保留为 NaN（不参与训练）
 
-    注意：Spearman 相关系数的正负号含义由此处 label 定义决定：
-    label=1 代表"高风险（低福祉）"，因此 ρ>0 表示该特征值越大越倾向高风险。
+    注意：Spearman 相关系数的正负号含义：
+    ρ > 0 表示该特征值越大，儿童社会情绪发展得分越高（正向关联）；
+    ρ < 0 表示该特征值越大，社会情绪发展得分越低（负向关联）。
     """
     available = [c for c in EMOTION_ITEMS if c in df.columns]
-    logger.info("情绪条目（%d 个）：%s", len(available), available)
+    logger.info("社会情绪发展条目（%d 个）：%s", len(available), available)
 
     score_df = df[available].copy()
     for col in available:
@@ -194,41 +190,24 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
         if col in REVERSED_ITEMS:
             score_df[col] = 6 - score_df[col]
 
-    # 行均值得分（正向：越高越健康）；所有条目均 NaN 的行得分为 NaN
-    wellbeing = score_df.mean(axis=1)
+    # 行均值得分（正向：越高越佳）；所有条目均 NaN 的行得分为 NaN
+    socioemotional = score_df.mean(axis=1)
 
-    if WELLBEING_CUTOFF is not None:
-        threshold = WELLBEING_CUTOFF
-        logger.info("使用临床划界分阈值：%.2f（来自 WELLBEING_CUTOFF 配置）", threshold)
-    else:
-        threshold = wellbeing.median()
-        logger.warning(
-            "WELLBEING_CUTOFF 未设置，使用样本中位数（%.2f）作为截断阈值。"
-            "此为相对截断，建议查阅 CFPS 用户手册，将 WELLBEING_CUTOFF 设为量表官方临床划界分",
-            threshold,
-        )
-
-    # 低于阈值 → 高风险（label=1）；NaN 行保留为 NaN，后续由 train_random_forest 过滤
-    labels = pd.Series(
-        np.where(wellbeing.notna(), (wellbeing < threshold).astype(float), np.nan),
-        index=wellbeing.index,
-    )
-    valid_mask = wellbeing.notna()
+    valid_mask = socioemotional.notna()
     nan_count = (~valid_mask).sum()
     if nan_count > 0:
         logger.warning(
-            "情绪条目全部缺失的行：%d（%.1f%%），将从训练集排除",
+            "社会情绪发展条目全部缺失的行：%d（%.1f%%），将从训练集排除",
             nan_count,
             nan_count / len(df) * 100,
         )
     logger.info(
-        "情绪健康得分：均值=%.2f，截断阈值=%.2f；高风险样本比=%.1f%%（基于 %d 有效行）",
-        wellbeing[valid_mask].mean(),
-        threshold,
-        labels[valid_mask].mean() * 100,
+        "社会情绪发展得分：均值=%.2f，标准差=%.2f，有效样本 n=%d",
+        socioemotional[valid_mask].mean(),
+        socioemotional[valid_mask].std(),
         valid_mask.sum(),
     )
-    return labels
+    return socioemotional
 
 
 # ===========================================================================
@@ -318,7 +297,7 @@ def correlation_analysis(
 
 
 # ===========================================================================
-# 随机森林模型
+# 随机森林回归模型
 # ===========================================================================
 
 def train_random_forest(
@@ -326,16 +305,16 @@ def train_random_forest(
     valid_map: dict[str, str],
     outcome_col: str,
     weight_col: str | None,
-) -> tuple[Pipeline, pd.DataFrame, float]:
+) -> tuple["Pipeline", pd.DataFrame, float, float]:
     """
-    训练随机森林模型，支持抽样权重。
-    返回 (pipeline, feature_importance_df, mean_auc)。
+    训练随机森林回归模型，支持抽样权重。
+    返回 (pipeline, feature_importance_df, mean_rmse, mean_r2)。
 
     说明：
-    - Pipeline 仅含 SimpleImputer + RandomForestClassifier，无 StandardScaler。
-      树模型基于数值排序分裂，对特征尺度不敏感，缩放既无必要也无法接受抽样权重。
+    - Pipeline 仅含 SimpleImputer + RandomForestRegressor，无 StandardScaler。
+      树模型基于数值排序分裂，对特征尺度不敏感。
     - 交叉验证与全量训练均传入相同抽样权重，确保评估指标与最终模型一致。
-    - 共线性检查：特征间 Spearman |ρ| ≥ 0.7 时输出警告，提示特征重要性解释风险。
+    - 共线性检查：特征间 Spearman |ρ| ≥ 0.7 时输出警告。
     """
     feature_cols = list(valid_map.values())
     X_raw = df_analysis[feature_cols].copy()
@@ -379,25 +358,38 @@ def train_random_forest(
                 )
 
     # -----------------------------------------------------------------------
-    # Pipeline：仅 Imputer + RandomForest（无 StandardScaler，树模型无需特征缩放）
+    # Pipeline：仅 Imputer + RandomForestRegressor（无 StandardScaler）
     # -----------------------------------------------------------------------
     pipeline = Pipeline(
         [
             ("imputer", SimpleImputer(strategy="median")),
-            ("rf", RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)),
+            ("rf", RandomForestRegressor(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)),
         ]
     )
 
-    # 交叉验证 AUC（传入抽样权重，与全量训练保持一致）
-    # 注：sklearn >= 1.4 使用 params= 传递逐样本参数（会按折自动切片）
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    # 5 折交叉验证（回归任务使用 KFold，不需要按类别分层）
+    cv = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
     cv_params = {"rf__sample_weight": w.values} if weight_col else {}
-    auc_scores = cross_val_score(
-        pipeline, X_raw, y, cv=cv, scoring="roc_auc", params=cv_params
+
+    mse_scores = cross_val_score(
+        pipeline, X_raw, y, cv=cv, scoring="neg_mean_squared_error", params=cv_params
     )
-    mean_auc = float(np.mean(auc_scores))
-    logger.info("5 折交叉验证 AUC（%s）：%.4f ± %.4f",
-                "加权" if weight_col else "未加权", mean_auc, np.std(auc_scores))
+    rmse_scores = np.sqrt(-mse_scores)
+    mean_rmse = float(np.mean(rmse_scores))
+
+    r2_scores = cross_val_score(
+        pipeline, X_raw, y, cv=cv, scoring="r2", params=cv_params
+    )
+    mean_r2 = float(np.mean(r2_scores))
+
+    logger.info(
+        "5 折交叉验证 RMSE（%s）：%.4f ± %.4f",
+        "加权" if weight_col else "未加权", mean_rmse, np.std(rmse_scores),
+    )
+    logger.info(
+        "5 折交叉验证 R²（%s）：%.4f ± %.4f",
+        "加权" if weight_col else "未加权", mean_r2, np.std(r2_scores),
+    )
 
     # 全量训练（含抽样权重）
     if weight_col:
@@ -408,7 +400,7 @@ def train_random_forest(
         pipeline.fit(X_raw, y)
 
     # 特征重要性
-    rf_model: RandomForestClassifier = pipeline.named_steps["rf"]
+    rf_model: RandomForestRegressor = pipeline.named_steps["rf"]
     importance_df = pd.DataFrame(
         {
             "variable": feature_cols,
@@ -417,7 +409,7 @@ def train_random_forest(
         }
     ).sort_values("importance", ascending=False)
 
-    return pipeline, importance_df, mean_auc
+    return pipeline, importance_df, mean_rmse, mean_r2
 
 
 # ===========================================================================
@@ -443,7 +435,7 @@ def plot_results(
     ax1.barh(corr_df["factor_label"], corr_df["spearman_rho"], color=colors)
     ax1.axvline(0, color="black", linewidth=0.8, linestyle="--")
     ax1.set_xlabel("Spearman ρ", fontsize=11)
-    ax1.set_title(f"预测因子与情绪健康风险相关性\n{title_suffix}", fontsize=12)
+    ax1.set_title(f"预测因子与社会情绪发展得分相关性\n{title_suffix}", fontsize=12)
     ax1.invert_yaxis()
 
     # --- 特征重要性条形图 ---
@@ -486,9 +478,9 @@ def main() -> None:
         factor_map["慢性病诊断(chronic_disease)"] = chronic_col
         logger.info("慢性病变量替换：qp4001 → %s（%s）", chronic_col, chronic_desc)
 
-    # 4. 构建结局变量
-    outcome_col = "depression_risk"
-    df[outcome_col] = build_outcome(df)
+    # 4. 构建结局变量（连续社会情绪发展得分）
+    outcome_col = "socioemotional_score"
+    df[outcome_col] = build_socioemotional_score(df)
 
     # 5. 自适应变量过滤
     valid_map, coverage_records = filter_factors(df, factor_map)
@@ -501,12 +493,12 @@ def main() -> None:
     corr_df = correlation_analysis(df, valid_map, outcome_col, coverage_records)
     logger.info("相关性分析完成")
 
-    # 7. 随机森林建模
-    logger.info("开始随机森林建模...")
-    pipeline, importance_df, mean_auc = train_random_forest(
+    # 7. 随机森林回归建模
+    logger.info("开始随机森林回归建模...")
+    pipeline, importance_df, mean_rmse, mean_r2 = train_random_forest(
         df, valid_map, outcome_col, weight_col
     )
-    logger.info("建模完成，交叉验证 AUC=%.4f", mean_auc)
+    logger.info("建模完成，交叉验证 RMSE=%.4f，R²=%.4f", mean_rmse, mean_r2)
 
     # 8. 合并输出
     result_df = corr_df.merge(
@@ -522,7 +514,8 @@ def main() -> None:
         how="left",
     )
     result_df["weight_var"] = weight_col if weight_col else "无"
-    result_df["cv_auc"] = round(mean_auc, 4)
+    result_df["cv_rmse"] = round(mean_rmse, 4)
+    result_df["cv_r2"] = round(mean_r2, 4)
 
     result_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     logger.info("结果已保存：%s（%d 行）", OUTPUT_CSV, len(result_df))
@@ -543,14 +536,15 @@ def main() -> None:
 
     # 10. 控制台摘要
     print("\n" + "=" * 60)
-    print("分析摘要")
+    print("社会情绪发展得分分析摘要")
     print("=" * 60)
     print(f"  数据文件：{DATA_FILE}")
     print(f"  总样本量：{len(df)}")
     print(f"  抽样权重：{weight_col or '未加权'}")
     print(f"  有效预测因子：{len(valid_map)} / {len(factor_map)}")
     print(f"  覆盖率阈值：{COVERAGE_THRESHOLD:.0%}")
-    print(f"  交叉验证 AUC：{mean_auc:.4f}")
+    print(f"  交叉验证 RMSE：{mean_rmse:.4f}")
+    print(f"  交叉验证 R²：{mean_r2:.4f}")
     print(f"  输出 CSV：{OUTPUT_CSV}")
     print(f"  输出 PNG：{OUTPUT_PNG}")
     print("=" * 60 + "\n")
