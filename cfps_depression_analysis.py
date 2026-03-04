@@ -22,8 +22,6 @@ cfps_depression_analysis.py
     python cfps_depression_analysis.py
 """
 
-from __future__ import annotations
-
 # ===========================================================================
 # 导入
 # ===========================================================================
@@ -106,6 +104,14 @@ RANDOM_STATE = 42
 CV_FOLDS = 5
 COVERAGE_THRESHOLD = 0.40      # 变量有效覆盖率阈值
 
+# CFPS 通用负值编码（缺失/不适用）
+NEGATIVE_CODES = [-1, -2, -8, -9, -10]
+
+# 扩展负值编码（含 79，适用于分类/健康变量；不适用于成绩等连续量）
+EXTENDED_NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
+
+# 成绩变量列名（79 可能为合法分数，仅用通用编码清洗）
+SCORE_COLS = {"wf501", "wf502"}
 
 # 社会情绪发展得分条目（we3xx，1–5 点 Likert 正向计分）
 EMOTION_ITEMS = [f"we3{str(i).zfill(2)}" for i in range(1, 13)]
@@ -166,7 +172,13 @@ logger = logging.getLogger(__name__)
 
 def clean_negative_codes(
     series: pd.Series,
-
+    codes: list | None = None,
+) -> pd.Series:
+    """将 CFPS 负值/不适用编码替换为 NaN。
+    
+    ``codes`` 未指定时使用 :data:`NEGATIVE_CODES`（通用缺失码）。
+    对健康/分类变量传入 :data:`EXTENDED_NEGATIVE_CODES` 以同时清洗编码 79。
+    """
     if codes is None:
         codes = NEGATIVE_CODES
     return series.replace({c: np.nan for c in codes})
@@ -312,24 +324,29 @@ def build_feature_matrix(
 ) -> tuple[pd.DataFrame, pd.Series, list[str], pd.Index]:
     """
     构建清洗后的特征矩阵 X 和结局向量 y。
-
+    - 对成绩变量（wf501/wf502）仅应用通用缺失码 NEGATIVE_CODES
+    - 对其余变量应用扩展缺失码 EXTENDED_NEGATIVE_CODES（含 79）
+    - 仅保留结局变量不为 NaN 的行
+    返回 (X_clean, y_clean, feature_labels, orig_indices)
+    其中 ``orig_indices`` 是 ``df`` 中有效行的原始整数索引，
+    供后续用 ``df_orig.loc[orig_indices]`` 安全提取 ID / 权重。
     """
     feature_labels = list(valid_map.keys())
 
     X_raw = pd.DataFrame(index=df.index)
     for label, col in valid_map.items():
-
+        codes = NEGATIVE_CODES if col in SCORE_COLS else EXTENDED_NEGATIVE_CODES
         X_raw[label] = clean_negative_codes(df[col], codes=codes)
 
     y = df[outcome_col]
     mask = y.notna()
-
+    orig_indices = mask[mask].index        # 原始行号，用于安全回查 df_orig
     X_clean = X_raw[mask].reset_index(drop=True)
     y_clean = y[mask].reset_index(drop=True)
 
     logger.info("特征矩阵：%d 行 × %d 列，特征：%s",
                 len(y_clean), len(feature_labels), feature_labels)
-
+    return X_clean, y_clean, feature_labels, orig_indices
 
 
 # ===========================================================================
@@ -439,7 +456,8 @@ def run_cv(
                 n_jobs=-1,
             )
         r2_scores = scores["test_r2"]
-
+        neg_mse   = scores["test_neg_mean_squared_error"]
+        neg_mae   = scores["test_neg_mean_absolute_error"]
         rmse_scores = np.sqrt(-neg_mse)
         mae_scores  = -neg_mae
         results[name] = {
@@ -550,7 +568,11 @@ def run_shap_analysis(
             plot_type="dot",
         )
         fig = plt.gcf()
-
+        fig.suptitle(
+            f"SHAP 蜂群图（{model_name}）\n"
+            r"特征对社会情绪发展得分（$Y$）的 SHAP 贡献",
+            fontsize=12,
+        )
         plt.tight_layout()
         fig.savefig(OUT_PNG_SHAP_BEE, dpi=300, bbox_inches="tight")
         logger.info("SHAP Beeswarm 图已保存：%s", OUT_PNG_SHAP_BEE)
@@ -630,7 +652,7 @@ def plot_r2_boxplot(
         flierprops={"marker": "o", "markersize": 5, "alpha": 0.5},
     )
 
-
+    colors = [plt.cm.tab10(i) for i in range(len(model_names))]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.75)
@@ -718,7 +740,6 @@ def export_pro_csv(
     shap_values: np.ndarray | None,
     feature_labels: list[str],
     weight_col: str | None,
-    orig_index: pd.Index,
 ) -> None:
     """
     导出 socioemotional_pro_analysis.csv：
@@ -729,7 +750,10 @@ def export_pro_csv(
     """
     out = X_clean.copy()
 
-
+    # 受访者 ID：通过原始行号 orig_indices 安全提取，避免重置索引后的错位
+    for id_col in ("pid", "personid", "childid", "id"):
+        if id_col in df_orig.columns:
+            out.insert(0, "受访者ID", df_orig.loc[orig_indices, id_col].values)
             break
 
     out["真实社会情绪发展得分_Y"] = y_clean.values
@@ -740,19 +764,17 @@ def export_pro_csv(
         y_pred = best_pipeline.predict(X_clean)
     out[f"预测得分_{best_name}"] = y_pred
 
-
+    # SHAP 贡献值（行数必须与 out 一致，否则跳过）
     if shap_values is not None and shap_values.shape[0] == len(out):
         for j, lbl in enumerate(feature_labels):
             col_name = f"SHAP_{lbl}"
             if j < shap_values.shape[1]:
                 out[col_name] = shap_values[:, j]
-    elif shap_values is not None:
-        logger.warning(
-            "SHAP values 行数 (%d) 与输出行数 (%d) 不一致，跳过 SHAP 列导出",
-            shap_values.shape[0], len(out),
-        )
 
-
+    # 抽样权重：通过 orig_indices 安全提取，保证与数据行对齐
+    if weight_col and weight_col in df_orig.columns:
+        w_vals = clean_negative_codes(df_orig[weight_col])
+        out["抽样权重"] = w_vals.loc[orig_indices].values
 
     out.to_csv(OUT_CSV_PRO, index=False, encoding="utf-8-sig")
     logger.info("Pro CSV 已保存：%s（%d 行 × %d 列）",
@@ -843,7 +865,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5. 构建特征矩阵 X 和结局向量 y
     # ------------------------------------------------------------------
-
+    X_clean, y_clean, feature_labels, orig_indices = build_feature_matrix(df, valid_map, outcome_col)
 
     # ------------------------------------------------------------------
     # 6. Spearman 相关性分析 + 绘图
@@ -916,7 +938,6 @@ def main() -> None:
         shap_values=shap_values,
         feature_labels=feature_labels,
         weight_col=weight_col,
-        orig_index=orig_index,
     )
 
     # ------------------------------------------------------------------
