@@ -23,21 +23,20 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.font_manager as _fm
 import matplotlib.pyplot as plt
-
-# 注册 WenQuanYi Zen Hei 字体（如存在），以支持中文显示
-_WQY_FONT = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-if __import__("pathlib").Path(_WQY_FONT).exists():
-    _fm.fontManager.addfont(_WQY_FONT)
-    plt.rcParams["font.family"] = "WenQuanYi Zen Hei"
 import numpy as np
 import pandas as pd
 import pyreadstat
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+# 注册 WenQuanYi Zen Hei 字体（如存在），以支持中文显示
+_WQY_FONT = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+if Path(_WQY_FONT).exists():
+    _fm.fontManager.addfont(_WQY_FONT)
+    plt.rcParams["font.family"] = "WenQuanYi Zen Hei"
 
 # ---------------------------------------------------------------------------
 # 全局配置
@@ -146,14 +145,17 @@ def resolve_chronic_disease_var(df: pd.DataFrame) -> tuple[str | None, str]:
 
 def resolve_weight_var(df: pd.DataFrame) -> tuple[str | None, str]:
     """
-    按优先级检测可用抽样权重变量。
+    按优先级检测可用抽样权重变量，同时要求覆盖率 ≥ COVERAGE_THRESHOLD。
     返回 (列名或None, 说明字符串)。
     """
     for col in WEIGHT_CANDIDATES:
         if col in df.columns:
             cov = compute_coverage(df[col])
             logger.info("权重变量：检测到 %s，覆盖率=%.1f%%", col, cov * 100)
-            return col, col
+            if cov >= COVERAGE_THRESHOLD:
+                return col, col
+            else:
+                logger.warning("权重变量 %s 覆盖率过低（%.1f%%），跳过", col, cov * 100)
     logger.warning("未找到权重变量（%s），将使用未加权分析", WEIGHT_CANDIDATES)
     return None, "无权重"
 
@@ -168,6 +170,7 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
     - 将负值编码替换为 NaN
     - 对逆向条目取反（6 - score，使高分代表更高风险）
     - 行均值 < 中位数 → label=1（高风险）；否则 → label=0
+    - 所有情绪条目均为 NaN 的行保留为 NaN（不参与训练）
     """
     available = [c for c in EMOTION_ITEMS if c in df.columns]
     logger.info("情绪条目（%d 个）：%s", len(available), available)
@@ -178,17 +181,28 @@ def build_outcome(df: pd.DataFrame) -> pd.Series:
         if col in REVERSED_ITEMS:
             score_df[col] = 6 - score_df[col]
 
-    # 行均值得分（正向：越高越健康）
+    # 行均值得分（正向：越高越健康）；所有条目均 NaN 的行得分为 NaN
     wellbeing = score_df.mean(axis=1)
-    # 低于中位数 → 高风险（label=1）
+    # 低于中位数 → 高风险（label=1）；NaN 行保留为 NaN，后续由 train_random_forest 过滤
     threshold = wellbeing.median()
-    labels = (wellbeing < threshold).astype(int)
+    labels = pd.Series(
+        np.where(wellbeing.notna(), (wellbeing < threshold).astype(float), np.nan),
+        index=wellbeing.index,
+    )
     valid_mask = wellbeing.notna()
+    nan_count = (~valid_mask).sum()
+    if nan_count > 0:
+        logger.warning(
+            "情绪条目全部缺失的行：%d（%.1f%%），将从训练集排除",
+            nan_count,
+            nan_count / len(df) * 100,
+        )
     logger.info(
-        "情绪健康得分：均值=%.2f，中位数=%.2f；高风险样本比=%.1f%%",
+        "情绪健康得分：均值=%.2f，中位数=%.2f；高风险样本比=%.1f%%（基于 %d 有效行）",
         wellbeing[valid_mask].mean(),
         threshold,
         labels[valid_mask].mean() * 100,
+        valid_mask.sum(),
     )
     return labels
 
@@ -269,6 +283,13 @@ def correlation_analysis(
             }
         )
     corr_df = pd.DataFrame(rows).sort_values("spearman_rho", key=abs, ascending=False)
+    nan_rho = corr_df["spearman_rho"].isna()
+    if nan_rho.any():
+        logger.warning(
+            "以下变量相关系数为 NaN（可能为常数列），已从相关性结果中排除：%s",
+            corr_df.loc[nan_rho, "variable"].tolist(),
+        )
+        corr_df = corr_df[~nan_rho].reset_index(drop=True)
     return corr_df
 
 

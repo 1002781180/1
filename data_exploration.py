@@ -139,7 +139,7 @@ def main():
     print("权重变量建议")
     print("=" * 70)
     weight_candidates = {
-        "child_weight": "问题声明中的候选权重变量（未找到）",
+        "child_weight": "问题声明中的候选权重变量",
         "rswt_natcs22n": "CFPS2022 个人横截面权数（标准化）- 推荐用于截面分析",
         "rswt_natpn1022n": "CFPS2022 个人面板权数（标准化）- 仅适用于面板分析",
     }
