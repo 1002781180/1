@@ -240,6 +240,13 @@ def build_socioemotional_score(df: pd.DataFrame) -> pd.Series:
             nan_count,
             nan_count / len(df) * 100,
         )
+    partial_count = int((score_df[valid_mask].notna().sum(axis=1) < len(available)).sum())
+    if partial_count > 0:
+        logger.info(
+            "社会情绪发展条目部分缺失的行：%d（%.1f%%），使用可用条目均值计算得分",
+            partial_count,
+            partial_count / len(df) * 100,
+        )
     logger.info(
         "社会情绪发展得分：均值=%.2f，标准差=%.2f，有效样本 n=%d",
         socioemotional[valid_mask].mean(),

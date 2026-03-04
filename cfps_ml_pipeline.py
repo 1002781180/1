@@ -140,10 +140,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_WQY_FONT = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-if Path(_WQY_FONT).exists():
-    _fm.fontManager.addfont(_WQY_FONT)
-    plt.rcParams["font.family"] = "WenQuanYi Zen Hei"
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansMonoCJKsc-Regular.otf",
+]
+for _font_path in _FONT_CANDIDATES:
+    if Path(_font_path).exists():
+        _fm.fontManager.addfont(_font_path)
+        _prop = _fm.FontProperties(fname=_font_path)
+        plt.rcParams["font.family"] = _prop.get_name()
+        break
 
 
 # ===========================================================================
