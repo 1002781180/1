@@ -3,6 +3,13 @@ depression_analysis_results.csv
 depression_analysis_results_coverage.csv
 depression_analysis_plot.png
 
+# cfps_ml_pipeline.py outputs
+cfps_pipeline_results.csv
+cfps_pipeline_roc_prc.png
+cfps_pipeline_calibration.png
+cfps_pipeline_shap_importance.png
+cfps_pipeline_shap_bmi.png
+
 # Python cache
 __pycache__/
 *.py[cod]
