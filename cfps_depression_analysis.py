@@ -22,8 +22,6 @@ cfps_depression_analysis.py
     python cfps_depression_analysis.py
 """
 
-from __future__ import annotations
-
 # ===========================================================================
 # 导入
 # ===========================================================================
@@ -36,13 +34,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.font_manager as _fm
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import pyreadstat
 from scipy import stats
 
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
     RandomForestRegressor,
     StackingRegressor,
@@ -84,6 +80,12 @@ for _font_path in _FONT_CANDIDATES:
         _prop = _fm.FontProperties(fname=_font_path)
         plt.rcParams["font.family"] = _prop.get_name()
         break
+else:
+    warnings.warn(
+        "未找到可用的中文字体（候选路径均不存在），图表中的中文标签可能显示为乱码。"
+        "请安装 WenQuanYi Zen Hei 或 Noto Sans CJK SC 字体。",
+        stacklevel=1,
+    )
 
 # 全局绘图参数（出版级）
 plt.rcParams.update({
@@ -166,7 +168,9 @@ logger = logging.getLogger(__name__)
 
 def clean_negative_codes(
     series: pd.Series,
-
+    codes: list[int] | None = None,
+) -> pd.Series:
+    """将负值编码替换为 NaN。"""
     if codes is None:
         codes = NEGATIVE_CODES
     return series.replace({c: np.nan for c in codes})
@@ -407,9 +411,8 @@ def get_stacking_model(
         n_jobs=-1,
         passthrough=False,
     )
-    # Stacking 本身不需要额外缩放（基模型 Pipeline 已各自缩放）
+    # Stacking 本身不需要额外填充（基模型 Pipeline 已各自处理）
     return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
         ("stacking", stacker),
     ])
 
@@ -475,7 +478,7 @@ def spearman_analysis(
         rows.append({
             "特征": feat,
             "Spearman_ρ": round(float(rho), 4),
-            "p 值": round(float(pval), 6),
+            "p 值": float(pval),
             "有效 n": int(mask.sum()),
         })
     corr_df = pd.DataFrame(rows)
@@ -651,7 +654,11 @@ def plot_r2_boxplot(
         r"各模型预测性能对比（$R^2$ 分布，5-fold CV）",
         fontsize=13, fontweight="bold",
     )
-    ax.set_ylim(bottom=min(-0.1, min(v.min() for v in r2_data) - 0.05))
+    y_max = max(v.max() for v in r2_data)
+    ax.set_ylim(
+        bottom=min(-0.1, min(v.min() for v in r2_data) - 0.05),
+        top=y_max + 0.08,
+    )
 
     # 图注
     note = (r"注：箱线图展示 $R^2$ 的 5 折 CV 分布；"
@@ -729,8 +736,12 @@ def export_pro_csv(
     """
     out = X_clean.copy()
 
-
+    for id_col in ("pid", "personid", "childid", "id"):
+        if id_col in df_orig.columns:
+            out.insert(0, "受访者ID", df_orig.loc[orig_indices, id_col].values)
             break
+    else:
+        logger.warning("未在数据中找到受访者 ID 列（pid/personid/childid/id），CSV 将不包含 ID 列")
 
     out["真实社会情绪发展得分_Y"] = y_clean.values
 
