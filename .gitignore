@@ -21,6 +21,10 @@ cfps_pipeline_calibration.png
 cfps_pipeline_shap_importance.png
 cfps_pipeline_shap_bmi.png
 
+# validate_questionnaire_labels.py outputs
+questionnaire_extracted_text.txt
+label_validation_report.txt
+
 # Python cache
 __pycache__/
 *.py[cod]
