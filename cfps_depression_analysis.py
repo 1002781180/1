@@ -107,6 +107,10 @@ DATA_FILE = "cfps2022childproxy_202410.dta"
 RANDOM_STATE = 42
 CV_FOLDS = 5
 COVERAGE_THRESHOLD = 0.40      # 变量有效覆盖率阈值
+# 标准缺失值编码（系统缺失/拒绝/不适用等负值编码，用于普通变量清洗）
+NEGATIVE_CODES = [-1, -2, -8, -9, -10, 79]
+# 扩展缺失值编码（在标准编码基础上增加 -3，用于覆盖率计算和 we3xx 条目清洗）
+EXTENDED_NEGATIVE_CODES = [-1, -2, -3, -8, -9, -10, 79]
 
 
 # 社会情绪发展得分条目（we3xx，1–5 点 Likert 正向计分）
@@ -120,18 +124,18 @@ REVERSED_ITEMS: list[str] = []   # 当前所有 we3xx 条目均为正向
 FACTOR_MAP: dict[str, str] = {
     "年龄":         "age",
     "性别":         "gender",
-    "城乡":         "urban22",
+    "城乡":         "urban22",    # 数据集派生变量，非问卷题目
     "民族":         "minzu",
     "语文成绩":     "wf501",
     "数学成绩":     "wf502",
     "BMI":          "bmi",
-    "近期生病":     "wc0",
-    "就医情况":     "wc4_1",
+    "近期生病":     "wc0",        # 儿童健康模块（wc 开头），需核实问卷中实际题号
+    "就医情况":     "wc4_1",      # 儿童健康模块，需核实问卷中实际题号
     # 慢性病/健康代理：qp4001 优先，动态回退
-    "慢性病诊断":   "qp4001",
+    "慢性病诊断":   "qp4001",     # 可能属于成人问卷模块，需确认是否存在于儿童代答数据集
 }
 
-# 权重候选变量（按优先级）
+# 权重候选变量（数据集派生变量，不在问卷中出现，由 CFPS 数据团队提供）
 WEIGHT_CANDIDATES = ["child_weight", "rswt_natcs22n", "rswt_natpn1022n"]
 
 # ===========================================================================
@@ -323,7 +327,7 @@ def build_feature_matrix(
     X_raw = pd.DataFrame(index=df.index)
     for label, col in valid_map.items():
 
-        X_raw[label] = clean_negative_codes(df[col], codes=codes)
+        X_raw[label] = clean_negative_codes(df[col])
 
     y = df[outcome_col]
     mask = y.notna()
@@ -334,6 +338,8 @@ def build_feature_matrix(
     logger.info("特征矩阵：%d 行 × %d 列，特征：%s",
                 len(y_clean), len(feature_labels), feature_labels)
 
+    orig_indices = df.index[mask]
+    return X_clean, y_clean, feature_labels, orig_indices
 
 
 # ===========================================================================
@@ -442,6 +448,8 @@ def run_cv(
                 n_jobs=-1,
             )
         r2_scores = scores["test_r2"]
+        neg_mse = scores["test_neg_mean_squared_error"]
+        neg_mae = scores["test_neg_mean_absolute_error"]
 
         rmse_scores = np.sqrt(-neg_mse)
         mae_scores  = -neg_mae
@@ -633,7 +641,8 @@ def plot_r2_boxplot(
         flierprops={"marker": "o", "markersize": 5, "alpha": 0.5},
     )
 
-
+    colors = ["#3498db", "#2ecc71", "#e74c3c", "#9b59b6", "#f39c12",
+              "#1abc9c", "#e67e22", "#95a5a6"][:len(model_names)]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.75)
@@ -854,6 +863,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5. 构建特征矩阵 X 和结局向量 y
     # ------------------------------------------------------------------
+    X_clean, y_clean, feature_labels, orig_indices = build_feature_matrix(
+        df, valid_map, outcome_col
+    )
 
 
     # ------------------------------------------------------------------
@@ -927,7 +939,7 @@ def main() -> None:
         shap_values=shap_values,
         feature_labels=feature_labels,
         weight_col=weight_col,
-        orig_index=orig_index,
+        orig_index=orig_indices,
     )
 
     # ------------------------------------------------------------------
