@@ -101,17 +101,17 @@ COVERAGE_THRESHOLD = 0.40
 # 特征与 CFPS 列名映射（feature_name -> CFPS 实际列名）
 # ---------------------------------------------------------------------------
 COLUMN_MAP: dict[str, str] = {
-    "age": "age",
-    "gender": "gender",
-    "urban": "urban22",
-    "sleep_duration": "wc2",      # 孩子每天睡眠时间（小时），推测列名
-    "screen_time": "wn401",       # 每天看电视/手机时间，推测列名
-    "chronic_disease": "qp4001",  # 慢性病；动态回退至下列候选
-    "recent_illness": "wc0",      # 过去一月是否生病
-    "chinese_score": "wf501",
-    "math_score": "wf502",
-    "bmi": "bmi",
-    "weight": "rswt_natcs22n",
+    "age": "age",                    # 问卷变量 ✅
+    "gender": "gender",              # 问卷变量 ✅
+    "urban": "urban22",              # 数据集派生变量，非问卷题目
+    "sleep_duration": "wc2",         # 问卷中存在 ✅，需核实具体题目描述
+    "screen_time": "wn401",          # 需核实问卷中实际题号（验证未找到）
+    "chronic_disease": "qp4001",     # 可能属于成人问卷模块，动态回退
+    "recent_illness": "wc0",         # 需核实问卷中实际题号（验证未找到）
+    "chinese_score": "wf501",        # 问卷变量 ✅
+    "math_score": "wf502",           # 问卷变量 ✅
+    "bmi": "bmi",                    # 问卷变量 ✅
+    "weight": "rswt_natcs22n",       # 数据集派生变量（抽样权重）
 }
 
 # 慢性病变量动态回退候选（按优先级）
